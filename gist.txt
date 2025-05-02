@@ -1,0 +1,91 @@
+# 1. Set Variables
+ chmod +x set-env.sh
+ source set-env.sh
+
+# 2. Create AZ resource group
+az group create --name $RESOURCE_GROUP --location $LOCATION
+
+# 3. Create AKS Cluster (Control Plane + Initial System Node Pool)
+az aks create \
+  --resource-group $RESOURCE_GROUP \
+  --name $AKS_CLUSTER_NAME \
+  --location $LOCATION \
+  --kubernetes-version $KUBERNETES_VERSION \
+  --node-count 1 \
+  --node-vm-size $NODE_VM_SIZE_SYSTEM_POOL \
+  --node-osdisk-size 30 \
+  --zones 2 \
+  --enable-oidc-issuer \
+  --enable-workload-identity \
+  --generate-ssh-keys \
+  --network-plugin azure # Using Azure CNI for features like private networking if needed later
+
+# 4. Add a Separate User Node Pool (better to run applications on separate "user" node pools)
+az aks nodepool add \
+  --resource-group $RESOURCE_GROUP \
+  --cluster-name $AKS_CLUSTER_NAME \
+  --name "userpool" \
+  --node-count 1 \
+  --min-count 1 \
+  --max-count 2 \
+  --node-vm-size $NODE_VM_SIZE_USER_POOL \
+  --node-osdisk-size 30 \
+  --zones 2 \
+  --mode User \
+  --enable-cluster-autoscaler
+
+# 5. Update ./kube/config File    
+az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER_NAME --overwrite-existing
+#(Use --overwrite-existing cautiously if you manage multiple clusters. You might prefer to use the --file argument to save to a specific file)
+
+# 6. Verify connection (nodes from both the system pool (agentpool) and user pool (userpool))
+kubectl get nodes -o wide
+
+# 7. Check available upgrades for the control plane and node pools
+az aks get-upgrades --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER_NAME --output table
+
+# 8. Upgrade the control plane first ONLY
+TARGET_K8S_VERSION="1.31.7"
+az aks upgrade \
+    --resource-group $RESOURCE_GROUP \
+    --name $AKS_CLUSTER_NAME \
+    --kubernetes-version $TARGET_K8S_VERSION \
+    --control-plane-only \
+    --yes # Use --yes to skip confirmation prompt
+
+# 9. check the current status of the control plane:
+ az aks show \                                                                                    
+  --resource-group $RESOURCE_GROUP \
+  --name $AKS_CLUSTER_NAME \
+  --query "kubernetesVersion" \
+  --output tsv
+
+  To get a broader view of what’s happening:
+  az aks show \
+  --resource-group $RESOURCE_GROUP \
+  --name $AKS_CLUSTER_NAME \
+  --output json
+
+  Look at:
+	•	provisioningState → e.g., Updating, Succeeded, or Failed
+	•	kubernetesVersion → shows the current version
+	•	powerState.code → e.g., Running
+
+# 10. Upgrade the Node Pools (One by One)
+    a) best practice to upgrade user pools first, then the system pool
+    az aks nodepool upgrade \
+    --resource-group $RESOURCE_GROUP \
+    --cluster-name $AKS_CLUSTER_NAME \
+    --name "userpool" \
+    --kubernetes-version $TARGET_K8S_VERSION
+
+    b) Upgrade the system node pool
+    az aks nodepool upgrade \
+    --resource-group $RESOURCE_GROUP \
+    --cluster-name $AKS_CLUSTER_NAME \
+    --name "agentpool" \
+    --kubernetes-version $TARGET_K8S_VERSION
+
+# 11. Delete the AKS cluster adn the resource group
+az aks delete --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER_NAME --yes --no-wait
+az group delete --name $RESOURCE_GROUP --yes --no-wait
